@@ -207,7 +207,8 @@ if not api_key:
 
 genai.configure(api_key=api_key)
 
-EMBED_MODEL = "models/text-embedding-004"
+# EMBED_MODEL = "models/text-embedding-004"
+EMBED_MODEL = "models/embedding-001"
 CHAT_MODEL = "gemini-2.5-flash"
 
 INDEX_PATH = "faiss.index"
