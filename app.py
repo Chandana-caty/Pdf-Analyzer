@@ -8,7 +8,7 @@ from PyPDF2 import PdfReader
 from dotenv import load_dotenv
 
 import google.generativeai as genai
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitter import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain_community.vectorstores import FAISS  # ✅ updated import
 from langchain.chains.question_answering import load_qa_chain
