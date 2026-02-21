@@ -201,7 +201,7 @@ from langchain_text_splitter import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain_community.vectorstores import FAISS
 from langchain_classic.chains import RetrievalQA
-from langchain.prompts import PromptTemplate
+from langchain_classic.prompts import PromptTemplate
 
 # ------------------ CONFIG ------------------ #
 load_dotenv()
