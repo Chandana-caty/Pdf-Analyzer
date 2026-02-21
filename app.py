@@ -190,22 +190,20 @@
 
 
 import os
-
-# Fix OpenMP duplicate runtime issue (often needed on some hosts)
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 import streamlit as st
 from PyPDF2 import PdfReader
 from dotenv import load_dotenv
-
 import google.generativeai as genai
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain_community.vectorstores import FAISS
 
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain_core.prompts import ChatPromptTemplate
+from langchain.chains import RetrievalQA
+from langchain.prompts import PromptTemplate
+
 
 # ------------------ CONFIG ------------------ #
 
@@ -225,21 +223,18 @@ FAISS_INDEX_PATH = "faiss_index"
 # ------------------ PDF HANDLING ------------------ #
 
 def get_pdf_text(pdf_docs):
-    """Extract text from uploaded PDF files."""
     text = ""
     if not pdf_docs:
         return text
 
     for pdf in pdf_docs:
-        pdf_reader = PdfReader(pdf)
-        for page in pdf_reader.pages:
-            page_text = page.extract_text() or ""
-            text += page_text + "\n"
+        reader = PdfReader(pdf)
+        for page in reader.pages:
+            text += (page.extract_text() or "") + "\n"
     return text
 
 
 def get_text_chunks(text: str):
-    """Split large text into overlapping chunks."""
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=2000,
         chunk_overlap=200
@@ -249,18 +244,16 @@ def get_text_chunks(text: str):
 
 # ------------------ VECTOR STORE ------------------ #
 
-def build_and_save_vector_store(text_chunks):
-    """Create and save a FAISS vector store from text chunks."""
-    if not text_chunks:
+def build_and_save_vector_store(chunks):
+    if not chunks:
         raise ValueError("No text chunks to index.")
 
     embeddings = GoogleGenerativeAIEmbeddings(model=EMBEDDING_MODEL)
-    vector_store = FAISS.from_texts(text_chunks, embedding=embeddings)
-    vector_store.save_local(FAISS_INDEX_PATH)
+    db = FAISS.from_texts(chunks, embedding=embeddings)
+    db.save_local(FAISS_INDEX_PATH)
 
 
 def load_vector_store():
-    """Load FAISS vector store from disk if it exists."""
     embeddings = GoogleGenerativeAIEmbeddings(model=EMBEDDING_MODEL)
     try:
         return FAISS.load_local(
@@ -272,26 +265,41 @@ def load_vector_store():
         return None
 
 
-# ------------------ QA CHAIN ------------------ #
+# ------------------ QA (RETRIEVALQA) ------------------ #
 
-def get_conversational_chain():
-    system_msg = (
-        "Answer the question using ONLY the provided context. "
-        'If the answer is not in the provided context, say exactly: "answer is not available in the context".'
-    )
+def build_qa_chain(vector_store):
+    prompt_template = """
+You are a helpful assistant.
+Answer ONLY using the provided context.
+If the answer is not in the context, say exactly: "answer is not available in the context".
 
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            ("system", system_msg),
-            ("human", "Context:\n{context}\n\nQuestion:\n{question}\n\nAnswer:")
-        ]
+Context:
+{context}
+
+Question:
+{question}
+
+Answer:
+"""
+    prompt = PromptTemplate(
+        input_variables=["context", "question"],
+        template=prompt_template
     )
 
     llm = ChatGoogleGenerativeAI(model=CHAT_MODEL)
-    return create_stuff_documents_chain(llm=llm, prompt=prompt)
 
+    # Retriever pulls the most relevant chunks from FAISS
+    retriever = vector_store.as_retriever(search_kwargs={"k": 4})
 
-# ------------------ USER QUERY HANDLING ------------------ #
+    qa = RetrievalQA.from_chain_type(
+        llm=llm,
+        chain_type="stuff",
+        retriever=retriever,
+        return_source_documents=False,
+        chain_type_kwargs={"prompt": prompt},
+    )
+    return qa
+
 
 def answer_question(user_question: str):
     vector_store = load_vector_store()
@@ -299,22 +307,22 @@ def answer_question(user_question: str):
         st.error("⚠️ Please upload PDFs and click 'Submit & Process' before asking questions.")
         return
 
-    docs = vector_store.similarity_search(user_question, k=4)
+    qa = build_qa_chain(vector_store)
 
-    chain = get_conversational_chain()
-    result = chain.invoke({"context": docs, "question": user_question})
+    result = qa.invoke({"query": user_question})
+    # result is typically {"query": "...", "result": "..."} in newer versions
+    answer = result.get("result") if isinstance(result, dict) else result
 
     st.write("**Your question:**")
     st.write(user_question)
     st.write("**Answer:**")
-    st.write(result)
+    st.write(answer)
 
 
 # ------------------ STREAMLIT APP ------------------ #
 
 def main():
     st.set_page_config(page_title="Chat with PDFs", page_icon="📂")
-
     st.header(":rainbow[Chat with PDFs :material/docs:]")
 
 
@@ -343,8 +351,8 @@ def main():
                     st.error("No text could be extracted from the PDFs.")
                     return
 
-                text_chunks = get_text_chunks(raw_text)
-                build_and_save_vector_store(text_chunks)
+                chunks = get_text_chunks(raw_text)
+                build_and_save_vector_store(chunks)
                 st.success("✅ Processing complete! You can now ask questions.")
 
 
