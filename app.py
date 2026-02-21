@@ -215,34 +215,14 @@ META_PATH = "faiss_meta.pkl"
 
 
 # ------------------ HELPERS ------------------ #
-# def read_pdfs(pdf_files) -> str:
-#     text = ""
-#     for f in pdf_files:
-#         reader = PdfReader(f)
-#         for page in reader.pages:
-#             text += (page.extract_text() or "") + "\n"
-#     return text
-
-def read_files(uploaded_files) -> str:
+def read_pdfs(pdf_files) -> str:
     text = ""
-    for f in uploaded_files:
-        name = (f.name or "").lower()
-        mime = (getattr(f, "type", "") or "").lower()
-
-        # PDF by extension or MIME
-        if name.endswith(".pdf") or "pdf" in mime:
-            reader = PdfReader(f)
-            for page in reader.pages:
-                text += (page.extract_text() or "") + "\n"
-        else:
-            # Treat everything else as text (txt/log/no extension)
-            raw = f.getvalue()
-            try:
-                text += raw.decode("utf-8") + "\n"
-            except UnicodeDecodeError:
-                text += raw.decode("latin-1", errors="ignore") + "\n"
-
+    for f in pdf_files:
+        reader = PdfReader(f)
+        for page in reader.pages:
+            text += (page.extract_text() or "") + "\n"
     return text
+
 
 
 def split_text(text: str, chunk_size: int = 2000, overlap: int = 200):
@@ -341,16 +321,12 @@ def main():
 
     with st.sidebar:
         st.subheader("Upload Your Documents")
-        # pdf_docs = st.file_uploader(
-        #     "Upload PDF files, then click Submit & Process",
-        #     accept_multiple_files=True,
-        #     type=["pdf","txt"],
-        # )
         pdf_docs = st.file_uploader(
             "Upload PDF files, then click Submit & Process",
             accept_multiple_files=True,
-            type=None,  # ✅ accepts pdf, txt, log, and files without extension
+            type=["pdf","txt"],
         )
+     
 
         if st.button("Submit & Process"):
             if not pdf_docs:
@@ -358,8 +334,8 @@ def main():
                 return
 
             with st.spinner("Reading PDFs..."):
-                # text = read_pdfs(pdf_docs)
-                text = read_files(pdf_docs)
+                text = read_pdfs(pdf_docs)
+               
 
             if not text.strip():
                 st.error("No text could be extracted from the PDFs.")
