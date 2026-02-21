@@ -358,7 +358,8 @@ def main():
                 return
 
             with st.spinner("Reading PDFs..."):
-                text = read_pdfs(pdf_docs)
+                # text = read_pdfs(pdf_docs)
+                text = read_files(pdf_docs)
 
             if not text.strip():
                 st.error("No text could be extracted from the PDFs.")
