@@ -215,12 +215,33 @@ META_PATH = "faiss_meta.pkl"
 
 
 # ------------------ HELPERS ------------------ #
-def read_pdfs(pdf_files) -> str:
+# def read_pdfs(pdf_files) -> str:
+#     text = ""
+#     for f in pdf_files:
+#         reader = PdfReader(f)
+#         for page in reader.pages:
+#             text += (page.extract_text() or "") + "\n"
+#     return text
+
+def read_files(uploaded_files) -> str:
     text = ""
-    for f in pdf_files:
-        reader = PdfReader(f)
-        for page in reader.pages:
-            text += (page.extract_text() or "") + "\n"
+    for f in uploaded_files:
+        name = (f.name or "").lower()
+        mime = (getattr(f, "type", "") or "").lower()
+
+        # PDF by extension or MIME
+        if name.endswith(".pdf") or "pdf" in mime:
+            reader = PdfReader(f)
+            for page in reader.pages:
+                text += (page.extract_text() or "") + "\n"
+        else:
+            # Treat everything else as text (txt/log/no extension)
+            raw = f.getvalue()
+            try:
+                text += raw.decode("utf-8") + "\n"
+            except UnicodeDecodeError:
+                text += raw.decode("latin-1", errors="ignore") + "\n"
+
     return text
 
 
@@ -320,10 +341,15 @@ def main():
 
     with st.sidebar:
         st.subheader("Upload Your Documents")
+        # pdf_docs = st.file_uploader(
+        #     "Upload PDF files, then click Submit & Process",
+        #     accept_multiple_files=True,
+        #     type=["pdf","txt"],
+        # )
         pdf_docs = st.file_uploader(
             "Upload PDF files, then click Submit & Process",
             accept_multiple_files=True,
-            type=["pdf","txt"],
+            type=None,  # ✅ accepts pdf, txt, log, and files without extension
         )
 
         if st.button("Submit & Process"):
