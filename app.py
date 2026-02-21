@@ -323,7 +323,7 @@ def main():
         pdf_docs = st.file_uploader(
             "Upload PDF files, then click Submit & Process",
             accept_multiple_files=True,
-            type=["pdf"],
+            type=["pdf","txt"],
         )
 
         if st.button("Submit & Process"):
