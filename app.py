@@ -196,7 +196,6 @@ import streamlit as st
 from PyPDF2 import PdfReader
 from dotenv import load_dotenv
 import faiss
-
 import google.generativeai as genai
 
 # ------------------ CONFIG ------------------ #
@@ -207,25 +206,65 @@ if not api_key:
 
 genai.configure(api_key=api_key)
 
-# EMBED_MODEL = "models/text-embedding-004"
-EMBED_MODEL = "models/embedding-001"
-CHAT_MODEL = "gemini-2.5-flash"
-
+CHAT_MODEL = "gemini-2.5-flash"   # keep as you want
 INDEX_PATH = "faiss.index"
 META_PATH = "faiss_meta.pkl"
 
 
-# ------------------ HELPERS ------------------ #
-def read_pdfs(pdf_files) -> str:
+# ------------------ MODEL PICKER (FIXES NotFound) ------------------ #
+def get_working_embed_model() -> str:
+    """
+    Finds an embedding model that your API key can actually access.
+    Fixes google.api_core.exceptions.NotFound errors.
+    """
+    if "embed_model" in st.session_state:
+        return st.session_state["embed_model"]
+
+    try:
+        for m in genai.list_models():
+            methods = getattr(m, "supported_generation_methods", []) or []
+            if "embedContent" in methods:
+                st.session_state["embed_model"] = m.name  # e.g. "models/embedding-001"
+                return m.name
+    except Exception as e:
+        st.error(f"Could not list models. Check API key / Gemini API enablement. Error: {e}")
+        raise
+
+    st.error(
+        "No embedding model available for this API key/project. "
+        "Enable Gemini/Generative Language API (and embeddings) for this key."
+    )
+    raise RuntimeError("No embedding model available")
+
+
+# ------------------ FILE READER (PDF + TXT + LOG + NO EXT) ------------------ #
+def read_files(uploaded_files) -> str:
+    """
+    Reads text from PDFs and any text-like file (txt/log/no extension).
+    Keeps your UI 'PDF' naming unchanged; just adds support.
+    """
     text = ""
-    for f in pdf_files:
-        reader = PdfReader(f)
-        for page in reader.pages:
-            text += (page.extract_text() or "") + "\n"
+    for f in uploaded_files:
+        name = (f.name or "").lower()
+        mime = (getattr(f, "type", "") or "").lower()
+
+        # PDF by extension OR MIME
+        if name.endswith(".pdf") or "pdf" in mime:
+            reader = PdfReader(f)
+            for page in reader.pages:
+                text += (page.extract_text() or "") + "\n"
+        else:
+            # Treat everything else as text: txt/log/no-extension
+            raw = f.getvalue()
+            try:
+                text += raw.decode("utf-8") + "\n"
+            except UnicodeDecodeError:
+                text += raw.decode("latin-1", errors="ignore") + "\n"
+
     return text
 
 
-
+# ------------------ TEXT CHUNKING ------------------ #
 def split_text(text: str, chunk_size: int = 2000, overlap: int = 200):
     if not text.strip():
         return []
@@ -244,12 +283,13 @@ def split_text(text: str, chunk_size: int = 2000, overlap: int = 200):
     return chunks
 
 
+# ------------------ EMBEDDINGS + FAISS ------------------ #
 def embed_texts(texts):
-    # google-generativeai embed_content supports batching via list input in many setups,
-    # but to be safest on Streamlit Cloud, do one-by-one.
+    embed_model = get_working_embed_model()
+
     vectors = []
     for t in texts:
-        resp = genai.embed_content(model=EMBED_MODEL, content=t)
+        resp = genai.embed_content(model=embed_model, content=t)
         vec = np.array(resp["embedding"], dtype="float32")
         vectors.append(vec)
     return np.vstack(vectors)
@@ -257,7 +297,7 @@ def embed_texts(texts):
 
 def build_faiss_index(vectors: np.ndarray):
     dim = vectors.shape[1]
-    index = faiss.IndexFlatIP(dim)  # inner product (works well if normalized)
+    index = faiss.IndexFlatIP(dim)  # cosine-like if normalized
     faiss.normalize_L2(vectors)
     index.add(vectors)
     return index
@@ -279,19 +319,20 @@ def load_index():
 
 
 def retrieve_chunks(index, chunks, query: str, k: int = 4):
-    qvec = genai.embed_content(model=EMBED_MODEL, content=query)["embedding"]
+    embed_model = get_working_embed_model()
+    qvec = genai.embed_content(model=embed_model, content=query)["embedding"]
     qvec = np.array(qvec, dtype="float32")[None, :]
     faiss.normalize_L2(qvec)
 
     scores, ids = index.search(qvec, k)
     results = []
     for i in ids[0]:
-        if i == -1:
-            continue
-        results.append(chunks[i])
+        if i != -1:
+            results.append(chunks[i])
     return results
 
 
+# ------------------ GEMINI ANSWER ------------------ #
 def ask_gemini(context_chunks, question: str):
     context = "\n\n---\n\n".join(context_chunks)
 
@@ -316,18 +357,19 @@ Answer:
 # ------------------ STREAMLIT APP ------------------ #
 def main():
     st.set_page_config(page_title="Chat with PDFs", page_icon="📂")
-    st.header("📂 Chat with PDFs")
+    st.header("📂 Chat with PDFs")  # keeping your app name
 
     user_question = st.text_input("Ask a question from the uploaded PDF files:")
 
     with st.sidebar:
         st.subheader("Upload Your Documents")
+
+        # ✅ accepts pdf/txt/log/no-extension (Windows hidden extensions)
         pdf_docs = st.file_uploader(
             "Upload PDF files, then click Submit & Process",
             accept_multiple_files=True,
-            type=["pdf","txt"],
+            type=None,
         )
-     
 
         if st.button("Submit & Process"):
             if not pdf_docs:
@@ -335,11 +377,10 @@ def main():
                 return
 
             with st.spinner("Reading PDFs..."):
-                text = read_pdfs(pdf_docs)
-               
+                text = read_files(pdf_docs)
 
             if not text.strip():
-                st.error("No text could be extracted from the PDFs.")
+                st.error("No text could be extracted from the files.")
                 return
 
             chunks = split_text(text, chunk_size=2000, overlap=200)
@@ -348,6 +389,11 @@ def main():
                 vectors = embed_texts(chunks)
                 index = build_faiss_index(vectors)
                 save_index(index, chunks)
+
+            # Optional: show loaded files (helpful for log testing)
+            st.sidebar.success(f"Loaded {len(pdf_docs)} file(s)")
+            for f in pdf_docs:
+                st.sidebar.write(f.name)
 
             st.success("✅ Processing complete! You can now ask questions.")
 
