@@ -197,9 +197,13 @@ from PyPDF2 import PdfReader
 from dotenv import load_dotenv
 import google.generativeai as genai
 
+# ✅ correct splitter import (plural)
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain_community.vectorstores import FAISS
+
+# ✅ LangChain v1.x legacy components
 from langchain_classic.chains import RetrievalQA
 from langchain_classic.prompts import PromptTemplate
 
