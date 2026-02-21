@@ -190,22 +190,14 @@
 
 
 import os
-os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-
+import pickle
+import numpy as np
 import streamlit as st
 from PyPDF2 import PdfReader
 from dotenv import load_dotenv
+import faiss
+
 import google.generativeai as genai
-
-# ✅ correct splitter import (plural)
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-
-from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
-from langchain_community.vectorstores import FAISS
-
-# ✅ LangChain v1.x legacy components
-from langchain_classic.chains import RetrievalQA
-from langchain_classic.prompts import PromptTemplate
 
 # ------------------ CONFIG ------------------ #
 load_dotenv()
@@ -215,41 +207,96 @@ if not api_key:
 
 genai.configure(api_key=api_key)
 
-EMBEDDING_MODEL = "models/text-embedding-004"
+EMBED_MODEL = "models/text-embedding-004"
 CHAT_MODEL = "gemini-2.5-flash"
-FAISS_INDEX_PATH = "faiss_index"
 
-# ------------------ PDF HANDLING ------------------ #
-def get_pdf_text(pdf_docs):
+INDEX_PATH = "faiss.index"
+META_PATH = "faiss_meta.pkl"
+
+
+# ------------------ HELPERS ------------------ #
+def read_pdfs(pdf_files) -> str:
     text = ""
-    for pdf in pdf_docs:
-        reader = PdfReader(pdf)
+    for f in pdf_files:
+        reader = PdfReader(f)
         for page in reader.pages:
             text += (page.extract_text() or "") + "\n"
     return text
 
-def get_text_chunks(text: str):
-    splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200)
-    return splitter.split_text(text)
 
-# ------------------ VECTOR STORE ------------------ #
-def build_and_save_vector_store(chunks):
-    embeddings = GoogleGenerativeAIEmbeddings(model=EMBEDDING_MODEL)
-    db = FAISS.from_texts(chunks, embedding=embeddings)
-    db.save_local(FAISS_INDEX_PATH)
+def split_text(text: str, chunk_size: int = 2000, overlap: int = 200):
+    if not text.strip():
+        return []
 
-def load_vector_store():
-    embeddings = GoogleGenerativeAIEmbeddings(model=EMBEDDING_MODEL)
-    try:
-        return FAISS.load_local(FAISS_INDEX_PATH, embeddings, allow_dangerous_deserialization=True)
-    except Exception:
-        return None
+    chunks = []
+    start = 0
+    n = len(text)
+    while start < n:
+        end = min(start + chunk_size, n)
+        chunks.append(text[start:end])
+        start = end - overlap
+        if start < 0:
+            start = 0
+        if end == n:
+            break
+    return chunks
 
-# ------------------ QA ------------------ #
-def build_qa_chain(vector_store):
-    prompt_template = """
+
+def embed_texts(texts):
+    # google-generativeai embed_content supports batching via list input in many setups,
+    # but to be safest on Streamlit Cloud, do one-by-one.
+    vectors = []
+    for t in texts:
+        resp = genai.embed_content(model=EMBED_MODEL, content=t)
+        vec = np.array(resp["embedding"], dtype="float32")
+        vectors.append(vec)
+    return np.vstack(vectors)
+
+
+def build_faiss_index(vectors: np.ndarray):
+    dim = vectors.shape[1]
+    index = faiss.IndexFlatIP(dim)  # inner product (works well if normalized)
+    faiss.normalize_L2(vectors)
+    index.add(vectors)
+    return index
+
+
+def save_index(index, chunks):
+    faiss.write_index(index, INDEX_PATH)
+    with open(META_PATH, "wb") as f:
+        pickle.dump({"chunks": chunks}, f)
+
+
+def load_index():
+    if not (os.path.exists(INDEX_PATH) and os.path.exists(META_PATH)):
+        return None, None
+    index = faiss.read_index(INDEX_PATH)
+    with open(META_PATH, "rb") as f:
+        meta = pickle.load(f)
+    return index, meta["chunks"]
+
+
+def retrieve_chunks(index, chunks, query: str, k: int = 4):
+    qvec = genai.embed_content(model=EMBED_MODEL, content=query)["embedding"]
+    qvec = np.array(qvec, dtype="float32")[None, :]
+    faiss.normalize_L2(qvec)
+
+    scores, ids = index.search(qvec, k)
+    results = []
+    for i in ids[0]:
+        if i == -1:
+            continue
+        results.append(chunks[i])
+    return results
+
+
+def ask_gemini(context_chunks, question: str):
+    context = "\n\n---\n\n".join(context_chunks)
+
+    prompt = f"""
+You are a helpful assistant.
 Answer ONLY using the provided context.
-If the answer is not in the provided context, say exactly: "answer is not available in the context".
+If the answer is not in the context, say exactly: "answer is not available in the context".
 
 Context:
 {context}
@@ -259,41 +306,17 @@ Question:
 
 Answer:
 """
-    prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
+    model = genai.GenerativeModel(CHAT_MODEL)
+    resp = model.generate_content(prompt)
+    return resp.text
 
-    llm = ChatGoogleGenerativeAI(model=CHAT_MODEL)
-    retriever = vector_store.as_retriever(search_kwargs={"k": 4})
-
-    qa = RetrievalQA.from_chain_type(
-        llm=llm,
-        chain_type="stuff",
-        retriever=retriever,
-        chain_type_kwargs={"prompt": prompt},
-        return_source_documents=False,
-    )
-    return qa
-
-def answer_question(user_question: str):
-    vector_store = load_vector_store()
-    if vector_store is None:
-        st.error("⚠️ Upload PDFs and click 'Submit & Process' first.")
-        return
-
-    qa = build_qa_chain(vector_store)
-    result = qa({"query": user_question})
-    st.write("**Your question:**")
-    st.write(user_question)
-    st.write("**Answer:**")
-    st.write(result["result"])
 
 # ------------------ STREAMLIT APP ------------------ #
 def main():
     st.set_page_config(page_title="Chat with PDFs", page_icon="📂")
-    st.header("🌈 Chat with PDFs 📄")
+    st.header("📂 Chat with PDFs")
 
     user_question = st.text_input("Ask a question from the uploaded PDF files:")
-    if user_question:
-        answer_question(user_question)
 
     with st.sidebar:
         st.subheader("Upload Your Documents")
@@ -308,15 +331,35 @@ def main():
                 st.error("Please upload at least one PDF file.")
                 return
 
-            with st.spinner("Processing PDFs..."):
-                raw_text = get_pdf_text(pdf_docs)
-                if not raw_text.strip():
-                    st.error("No text could be extracted from the PDFs.")
-                    return
+            with st.spinner("Reading PDFs..."):
+                text = read_pdfs(pdf_docs)
 
-                chunks = get_text_chunks(raw_text)
-                build_and_save_vector_store(chunks)
-                st.success("✅ Processing complete! You can now ask questions.")
+            if not text.strip():
+                st.error("No text could be extracted from the PDFs.")
+                return
+
+            chunks = split_text(text, chunk_size=2000, overlap=200)
+
+            with st.spinner("Creating embeddings + FAISS index..."):
+                vectors = embed_texts(chunks)
+                index = build_faiss_index(vectors)
+                save_index(index, chunks)
+
+            st.success("✅ Processing complete! You can now ask questions.")
+
+    if user_question:
+        index, chunks = load_index()
+        if index is None:
+            st.error("⚠️ Upload PDFs and click 'Submit & Process' first.")
+            return
+
+        with st.spinner("Searching + generating answer..."):
+            top_chunks = retrieve_chunks(index, chunks, user_question, k=4)
+            answer = ask_gemini(top_chunks, user_question)
+
+        st.write("**Answer:**")
+        st.write(answer)
+
 
 if __name__ == "__main__":
     main()
