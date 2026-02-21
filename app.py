@@ -197,19 +197,15 @@ from PyPDF2 import PdfReader
 from dotenv import load_dotenv
 import google.generativeai as genai
 
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain_community.vectorstores import FAISS
-
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
 
-
 # ------------------ CONFIG ------------------ #
-
 load_dotenv()
 api_key = os.getenv("GOOGLE_API_KEY")
-
 if not api_key:
     raise ValueError("GOOGLE_API_KEY is not set in .env file")
 
@@ -219,59 +215,37 @@ EMBEDDING_MODEL = "models/text-embedding-004"
 CHAT_MODEL = "gemini-2.5-flash"
 FAISS_INDEX_PATH = "faiss_index"
 
-
 # ------------------ PDF HANDLING ------------------ #
-
 def get_pdf_text(pdf_docs):
     text = ""
-    if not pdf_docs:
-        return text
-
     for pdf in pdf_docs:
         reader = PdfReader(pdf)
         for page in reader.pages:
             text += (page.extract_text() or "") + "\n"
     return text
 
-
 def get_text_chunks(text: str):
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=2000,
-        chunk_overlap=200
-    )
+    splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200)
     return splitter.split_text(text)
 
-
 # ------------------ VECTOR STORE ------------------ #
-
 def build_and_save_vector_store(chunks):
-    if not chunks:
-        raise ValueError("No text chunks to index.")
-
     embeddings = GoogleGenerativeAIEmbeddings(model=EMBEDDING_MODEL)
     db = FAISS.from_texts(chunks, embedding=embeddings)
     db.save_local(FAISS_INDEX_PATH)
 
-
 def load_vector_store():
     embeddings = GoogleGenerativeAIEmbeddings(model=EMBEDDING_MODEL)
     try:
-        return FAISS.load_local(
-            FAISS_INDEX_PATH,
-            embeddings,
-            allow_dangerous_deserialization=True
-        )
+        return FAISS.load_local(FAISS_INDEX_PATH, embeddings, allow_dangerous_deserialization=True)
     except Exception:
         return None
 
-
-# ------------------ QA (RETRIEVALQA) ------------------ #
-
+# ------------------ QA ------------------ #
 def build_qa_chain(vector_store):
     prompt_template = """
-You are a helpful assistant.
 Answer ONLY using the provided context.
-If the answer is not in the context, say exactly: "answer is not available in the context".
+If the answer is not in the provided context, say exactly: "answer is not available in the context".
 
 Context:
 {context}
@@ -281,63 +255,48 @@ Question:
 
 Answer:
 """
-    prompt = PromptTemplate(
-        input_variables=["context", "question"],
-        template=prompt_template
-    )
+    prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
 
     llm = ChatGoogleGenerativeAI(model=CHAT_MODEL)
-
-    # Retriever pulls the most relevant chunks from FAISS
     retriever = vector_store.as_retriever(search_kwargs={"k": 4})
 
     qa = RetrievalQA.from_chain_type(
         llm=llm,
         chain_type="stuff",
         retriever=retriever,
-        return_source_documents=False,
         chain_type_kwargs={"prompt": prompt},
+        return_source_documents=False,
     )
     return qa
-
 
 def answer_question(user_question: str):
     vector_store = load_vector_store()
     if vector_store is None:
-        st.error("⚠️ Please upload PDFs and click 'Submit & Process' before asking questions.")
+        st.error("⚠️ Upload PDFs and click 'Submit & Process' first.")
         return
 
     qa = build_qa_chain(vector_store)
-
-    result = qa.invoke({"query": user_question})
-    # result is typically {"query": "...", "result": "..."} in newer versions
-    answer = result.get("result") if isinstance(result, dict) else result
-
+    result = qa({"query": user_question})
     st.write("**Your question:**")
     st.write(user_question)
     st.write("**Answer:**")
-    st.write(answer)
-
+    st.write(result["result"])
 
 # ------------------ STREAMLIT APP ------------------ #
-
 def main():
     st.set_page_config(page_title="Chat with PDFs", page_icon="📂")
-    st.header(":rainbow[Chat with PDFs :material/docs:]")
+    st.header("🌈 Chat with PDFs 📄")
 
-
-    user_question = st.text_input("🟧 Ask a question from the uploaded PDF files:")
+    user_question = st.text_input("Ask a question from the uploaded PDF files:")
     if user_question:
         answer_question(user_question)
 
     with st.sidebar:
-        st.subheader("📗 Upload Your Documents")
-        st.title("📘 Menu")
-
+        st.subheader("Upload Your Documents")
         pdf_docs = st.file_uploader(
-            "📕 Upload your PDF files and click on the 'Submit & Process' button",
+            "Upload PDF files, then click Submit & Process",
             accept_multiple_files=True,
-            type=["pdf"]
+            type=["pdf"],
         )
 
         if st.button("Submit & Process"):
@@ -354,7 +313,6 @@ def main():
                 chunks = get_text_chunks(raw_text)
                 build_and_save_vector_store(chunks)
                 st.success("✅ Processing complete! You can now ask questions.")
-
 
 if __name__ == "__main__":
     main()
